@@ -1,0 +1,552 @@
+---
+title: "DA Yekun Layihə"
+author: "Aytaj Sh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    css: style.css
+---
+
+# İlkin hazırlıq 
+## Paketlərin aktivləşdirilməsi və datanın import edilməsi
+
+```{r setup, echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+library(data.table)
+library(readr)
+library(readxl)
+library(data.table)
+library(dplyr)
+library(DT)
+library(ggplot2)
+library(plotly)
+library(stringr)
+library(janitor)
+library(tidyr)
+library(lubridate)
+library(scales)
+library(ggplot2)
+
+fp_receipts=readRDS("C:/Users/user/Downloads/fp_receipts.rds")
+fp_map=readRDS("C:/Users/user/Downloads/fp_map.rds")
+
+
+```
+
+## Data preparetion
+
+```{r t1, echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+#Xammal məlumatda olan hər bir həddin tipi, classı yoxlanır
+
+glimpse(fp_receipts)  
+glimpse(fp_map)
+
+#NA sayı yoxlanır
+
+colSums(is.na(fp_receipts))
+colSums(is.na(fp_map))
+
+#Data Cleaning (Hərf və boşluqlarda düzəlişlərin və təmizlənmənin edilməsi)
+
+receipts_clean <- fp_receipts %>%
+  mutate(
+    product_name = str_squish(str_to_lower(product_name, locale = "tr")),
+    pos          = str_squish(str_to_lower(pos, locale = "tr"))
+  )
+
+map_clean=fp_map %>% mutate(
+  product=str_squish(str_to_lower(product, locale = "tr"))
+)
+
+
+#Map datasında təkrarlanmanın yoxlanması(product üzrə təkrarlanma)
+
+map_clean %>%
+  count(product, period) %>%
+  filter(n > 1)  #Qeyd- təkrarlanma var
+
+
+#Təkrarlanmanı aradan qaldırmaq üçün aqreqqasiyanın edilməsi
+
+map_agg <- map_clean %>%
+  group_by(product, period) %>%
+  summarise(
+    profit_margin = mean(profit_margin, na.rm = TRUE),
+    product_type = first(product_type),
+    .groups = "drop"
+  )
+
+
+```
+
+## Join prosesi və yeni hədlərin əlavə edilməsi  
+
+```{r t2,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+# join edə bilmək üçün ortaq hədlərdən digəri yaradılır(period)
+
+receipts_clean <- receipts_clean %>%
+  mutate(
+    period = as.numeric(format(rec_date,"%Y%m")))
+
+#join edilir 
+
+df <- receipts_clean %>%
+  left_join(map_agg,
+            by = c("product_name" = "product",
+                   "period" = "period"))
+
+# yeni hədlər yaradılır
+
+df=df %>% mutate(
+    revenue= round(qnt*unit_price,2),
+    profit=round(revenue*profit_margin,2)
+)
+
+glimpse(df)
+
+```
+
+# Deskriptiv təhlil
+
+## Summary , NA sayı yoxlanması
+
+```{r t3,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+summary(df)
+colSums(is.na(df))
+
+```
+
+## Ümumi satış göstəriciləri
+
+```{r t4,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+df %>%
+  summarise(
+    total_transactions = n(),
+    total_quantity = sum(qnt, na.rm = TRUE),
+    total_revenue = sum(revenue, na.rm = TRUE),
+    avg_unit_price = mean(unit_price, na.rm = TRUE)
+  )
+
+
+```
+
+## Product type -a görə receipts/transaction sayı qrafik
+
+```{r t5,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+df %>%
+  filter(!is.na(product_type)) %>%
+  count(product_type) %>%
+  mutate(percent = round(n / sum(n) * 100, 2)) %>%
+  ggplot(aes(x = reorder(product_type, -percent), y = percent, fill = product_type)) +
+  geom_col() +
+  geom_text(aes(label = paste0(percent, "%")), vjust = -0.5) + # Faizləri sütunun üzərinə yazır
+  labs(
+    title = "Məhsul Növlərinin Faiz Payı",
+    x = "Məhsul Növü",
+    y = "Faiz (%)",
+    fill = "Növ"
+  ) +
+  theme_minimal()
+
+
+```
+
+#Şərh-İki product_type mövcuddur 99.03% product- FOOD , 0.97 %  product - NON-FOOD (NA hədlər daxil edilməyib)
+
+
+
+## Product type görə Revenue boxplot
+
+```{r t6,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+p <- df %>%
+  filter(!is.na(product_type)) %>%
+  ggplot(aes(x = product_type, y = revenue, fill = product_type)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_y_log10(labels = label_number(big.mark = ",")) +
+  scale_fill_manual(values = c("FOOD" = "#4CAF50", "NON-FOOD" = "#2196F3")) +
+  labs(
+    title = "FOOD vs NON-FOOD üzrə Revenue paylanması",
+    x = "Product type",
+    y = "Revenue"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+
+ggplotly(p)  #Qeyd- burda olan anomaliyalar növbəti hissədə danışılacaq
+
+
+```
+
+#Şərh-FOOD məhsullarında revenue daha stabil və aşağı dəyişkənliyə malikdir. NON-FOOD kateqoriyasında isə revenue paylanması daha genişdir və yüksək məbləğli outlier-lər səbəbilə dəyişkənlik daha yüksəkdir.
+
+
+## Receipt/Transaction sayına görə top 5 product
+
+```{r t7,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+
+top_products_tx <- df %>%
+  group_by(product_name) %>%
+  summarise(
+    transactions = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(transactions)) %>%
+  slice_head(n = 5)
+
+p <- ggplot(top_products_tx, aes(
+  x = reorder(product_name, transactions),
+  y = transactions,
+  fill = product_name
+)) +
+  geom_col() +
+  labs(
+    title = "Transaction sayına görə Top 5 Məhsul",
+    x = "Məhsul",
+    y = "Transaction sayı"
+  ) +
+  guides(fill = "none")
+
+ggplotly(p, tooltip = c("x", "y"))
+
+
+```
+
+#Şərh-Qrafik transaction sayına görə ən çox satılan 5 məhsulu göstərir. Ən yüksək transaction sayı banan kg və sərbəst satış məhsullarına aiddir ki, bu da onların yüksək tələbatlı məhsullar olduğunu göstərir. Kartof kg orta səviyyədə yer alır, xiyar və soğan isə digər məhsullarla müqayisədə daha az transaction-a malikdir.
+
+
+
+## Revenue üzrə dağılım
+
+```{r t8,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+
+p=ggplot(df, aes(x = revenue)) +
+  geom_histogram(
+    bins = 50,
+    fill = "#4C72B0",
+    color = "white",
+    alpha = 0.9
+  ) +
+  scale_x_log10(labels = label_number(big.mark = ",")) +
+  labs(
+    title = "Revenue paylanması",
+    x = "Revenue",
+    y = "Receipt / Transaction sayı"
+  ) +
+  theme_minimal(base_size = 13)
+
+ggplotly(p)
+
+
+```
+
+#Şərh-Revenue paylanması sağa meyllidir (right-skewed). Əməliyyatların böyük hissəsi aşağı revenue dəyərlərində cəmlənmişdir, yüksək revenue-li azsaylı əməliyyatlar isə uzun sağ quyruq və anomaliyalar yaradır.
+
+
+
+
+## Revenue-ya görə top 5 product
+
+```{r t9,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+top_products_rev <- df %>%
+  group_by(product_name) %>%
+  summarise(
+    revenue = sum(revenue, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(revenue)) %>%
+  slice_head(n = 5)
+
+
+p <- ggplot(top_products_rev, aes(x = product_name, y = revenue, fill = product_name)) +
+  geom_col(alpha = 0.9) +
+  scale_y_continuous(
+    labels = label_number(
+      scale = 1e-6,
+      suffix = "M"
+    )
+  ) +
+  labs(
+    title = "Top 5 məhsul – Revenue üzrə ",
+    x = "Product name",
+    y = "Revenue (M)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 20, hjust = 1)
+  )
+
+ggplotly(p)
+
+
+```
+
+#Şərh-Qrafik revenue üzrə ən yüksək gəlir gətirən 5 məhsulu göstərir. Sərbəst satış açıq şəkildə liderdir və ümumi gəlirin böyük hissəsini formalaşdırır. Digər məhsullar arasında revenue fərqləri mövcuddur, lakin heç biri sərbəst satış səviyyəsinə yaxınlaşmır.
+
+
+## Top 10 Pos Revenue-ya görə
+
+```{r t10,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+top10_pos <- df %>%
+  group_by(pos) %>%
+  summarise(
+    total_revenue = sum(revenue, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_revenue)) %>%
+  slice_head(n = 10)
+
+p <- ggplot(
+  top10_pos,
+  aes(
+    x = reorder(pos, total_revenue),
+    y = total_revenue,
+    fill = pos,
+    text = paste0("POS: ", pos, "<br>Total revenue: ", comma(total_revenue))
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(labels = label_number()) +
+  labs(
+    title = "Top 10 POS üzrə ümumi revenue",
+    x = "POS",
+    y = "Total revenue"
+  ) +
+  guides(fill = "none")
+
+ggplotly(p, tooltip = "text")
+
+```
+
+#Şərh-Qrafik Revenue-ya görə TOP 10 POS göstərir. Mağaza və Araz market digər POS-larla müqayisədə əhəmiyyətli dərəcədə daha yüksək gəlir formalaşdırır. Qalan POS-larda revenue kəskin şəkildə azalır ki, bu da satışların əsasən bir neçə əsas nöqtədə cəmləndiyini göstərir.
+
+
+
+# Anomaliyalar
+
+## Gündəlik transaction sayı (Outliers)
+
+```{r t11,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+p <- df %>%
+  group_by(rec_date) %>%
+  summarise(sales_count = n(), .groups = "drop") %>%
+  mutate(
+    Q1 = quantile(sales_count, 0.25),
+    Q3 = quantile(sales_count, 0.75),
+    IQRv = Q3 - Q1,
+    is_outlier = sales_count < (Q1 - 1.5 * IQRv) |
+                 sales_count > (Q3 + 1.5 * IQRv)
+  ) %>%
+  ggplot(aes(rec_date, sales_count)) +
+  geom_line(color = "steelblue", linewidth = 1.1) +
+  geom_point(aes(color = is_outlier), size = 2) +
+  scale_color_manual(values = c("FALSE" = "steelblue", "TRUE" = "red")) +
+  scale_y_continuous(labels = label_number(big.mark = ",")) +
+  labs(
+    title = "Gündəlik transaction sayı (Outliers)",
+    x = "Tarix",
+    y = "Transaction sayı",
+    color = "Outlier"
+  ) +
+  theme_minimal(base_size = 13)
+
+ggplotly(p)
+
+
+```
+
+#Şərh-Gündəlik transaction sayında kəskin bir yüksək outlier(2258096) müşahidə olunur ki, bu dəyər digər günlərlə müqayisədə anormal dərəcədə böyükdür. Qalan günlərdə transaction sayı nisbətən stabil dəyişir.
+
+
+## Zaman üzrə revenue dağılımında anomaliyalar
+
+```{r t12,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+daily_rev <- df %>%
+  group_by(rec_date) %>%
+  summarise(total_revenue = sum(revenue, na.rm = TRUE), .groups = "drop")
+
+Q1 <- quantile(daily_rev$total_revenue, 0.25, na.rm = TRUE)
+Q3 <- quantile(daily_rev$total_revenue, 0.75, na.rm = TRUE)
+IQRv <- Q3 - Q1
+
+lower <- Q1 - 1.5 * IQRv
+upper <- Q3 + 1.5 * IQRv
+
+daily_rev <- daily_rev %>%
+  mutate(
+    anomaly = total_revenue < lower | total_revenue > upper
+  )
+
+p <- ggplot(daily_rev, aes(x = rec_date, y = total_revenue)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  geom_point(
+    data = daily_rev %>% filter(anomaly),
+    aes(x = rec_date, y = total_revenue),
+    color = "red",
+    size = 3
+  ) +
+  scale_y_continuous(labels = label_number()) +
+  labs(
+    title = "Zaman üzrə ümumi revenue (anomaliya)",
+    x = "Tarix",
+    y = "Revenue"
+  ) +
+  theme_minimal(base_size = 13)
+
+ggplotly(p)
+
+
+
+```
+
+#Şərh-Zaman üzrə ümumi revenue-da  çox yüksək anomaliya(32056823) müşahidə olunur ki, bu gün digər dövrlərlə müqayisədə kəskin fərqlənir. Sonrakı günlərdə revenue daha aşağı və nisbətən stabil səviyyədə davam edir.
+
+
+## Product type görə Revenue boxplot anomaliyalar
+
+```{r t13,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+p <- df %>%
+  filter(!is.na(product_type)) %>%
+  ggplot(aes(x = product_type, y = revenue, fill = product_type)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) + 
+  geom_point(data = function(d) {
+      d %>% group_by(product_type) %>%
+        filter(revenue < quantile(revenue, 0.25) - 1.5 * IQR(revenue) | 
+               revenue > quantile(revenue, 0.75) + 1.5 * IQR(revenue))
+    }, 
+    aes(color = "Outlier"), color = "red", alpha = 0.6) +
+  scale_y_log10(labels = label_number(big.mark = ",")) +
+  scale_fill_manual(values = c("FOOD" = "#4CAF50", "NON-FOOD" = "#2196F3")) +
+  labs(
+    title = "FOOD vs NON-FOOD üzrə Revenue paylanması",
+    x = "Product type",
+    y = "Revenue"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
+
+ggplotly(p)
+
+
+```
+
+#Şərh-Qrafikdə qırmızı ilə göstərilən nöqtələr outlier-ləri ifadə edir. FOOD kateqoriyasında outlier-lər mövcud olsa da əsasən aşağı intervalda cəmlənmişdir. NON-FOOD məhsullarında isə daha çox və daha yüksək revenue-li outlier-lər müşahidə olunur ki, bu da bu kateqoriyada nadir, lakin çox yüksək məbləğli transactionların olduğunu göstərir.
+
+
+## Profit Margin dağılımında anomaliyalar
+
+```{r t14,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+Q1 <- quantile(df$profit_margin, 0.25, na.rm = TRUE)
+Q3 <- quantile(df$profit_margin, 0.75, na.rm = TRUE)
+IQRv <- Q3 - Q1
+lb <- Q1 - 1.5 * IQRv
+ub <- Q3 + 1.5 * IQRv
+
+df_pm <- df %>%
+  filter(!is.na(profit_margin)) %>%
+  mutate(flag = ifelse(profit_margin < lb | profit_margin > ub, "Anomaly", "Normal"))
+
+p2 <- ggplot(df_pm, aes(x = profit_margin, fill = flag)) +
+  geom_histogram(
+    bins = 50,
+    position = "identity",
+    alpha = 0.65,
+    color = "white"
+  ) +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "Profit margin paylanması (Normal vs Anomaly)",
+    x = "Profit margin",
+    y = "Receipt / Transaction sayı"
+  ) +
+  scale_fill_manual(values = c("Normal" = "#00B894", "Anomaly" = "#D63031")) +
+  theme_minimal(base_size = 13)
+
+ggplotly(p2)
+
+
+
+```
+
+#Şərh-Profit margin paylanmasının əsas hissəsi 0–50% aralığında cəmlənmişdir və normal dəyərləri təmsil edir. Qrafikdə qırmızı ilə göstərilən anomaliyalar əsasən çox yüksək (≈100%) və mənfi profit margin dəyərləridir ki, bunlar nadir hallardır və  qeyri-adi əməliyyatları göstərə bilər.
+
+
+
+# Proqnoz və Fərziyyələr
+
+## Correlation tapılması
+
+```{r t16,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+num_df <- df %>% 
+  select(where(is.numeric))
+
+cor_matrix <- cor(
+  num_df,
+  use = "pairwise.complete.obs",
+  method = "pearson"
+)
+
+cor_matrix_round <- round(cor_matrix, 2)
+cor_matrix_round
+```
+#Şərh-Cədvəl göstərir ki, revenue əsasən qnt (0.88) və unit_price (0.46) ilə güclü və orta səviyyəli müsbət əlaqəyə malikdir. Profit isə xüsusilə revenue (0.84) və unit_price (0.79) ilə güclü korrelasiya göstərir. Profit_margin digər dəyişənlərlə zəif əlaqəlidir, period dəyişəni isə əsas göstəricilərlə demək olar ki, əlaqə göstərmir.
+
+
+## Model qurulması
+
+```{r t17,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+rev_model <- lm(
+  revenue ~ qnt + unit_price,
+  data = df
+)
+
+summary(rev_model)
+
+new_data <- data.frame(
+  qnt = c(10, 20, 30),
+  unit_price = c(5, 5, 5)
+)
+
+
+pred_table <- new_data %>%
+  mutate(
+    predicted_revenue = predict(rev_model, new_data)
+  )
+
+pred_table
+
+
+
+```
+# Xülasə
+
+
+```{r t18,echo=TRUE,warning=FALSE,message=FALSE,include=TRUE}
+
+#Bu layihədə satış əməliyyatlarına dair verilənlər əsasında deskriptiv təhlil aparılmış, anomaliyalar müəyyən edilmiş və gəlirin formalaşmasını izah etmək üçün sadə proqnoz yanaşması tətbiq olunmuşdur. İlkin mərhələdə məlumatlar yoxlanılmış, mətn sahələri təmizlənmiş, map datasında mövcud olan təkrarlanma aqreqasiya yolu ilə aradan qaldırılmış və satış datası ilə join edilmişdir. Daha sonra revenue və profit kimi törəmə göstəricilər hesablanmışdır.
+
+#Deskriptiv və vizual analizlər nəticəsində bəzi tarixlərdə qeyri-adi yüksək əməliyyat sayı və gəlir dəyərləri müşahidə olunmuşdur. Bu hallar real biznes proseslərini əks etdirdiyi üçün anomaliya kimi saxlanılmış və nəticələrin şərhində nəzərə alınmışdır. Profit margin göstəricisində mənfi və yüksək dəyərlərin mövcudluğu riskli və qeyri-standart əməliyyatlara işarə edir.
+
+#Proqnoz mərhələsində aparılan korrelyasiya analizi revenue ilə quantity arasında güclü, unit_price ilə isə orta səviyyəli müsbət əlaqə olduğunu göstərmişdir. Bu nəticələrə əsaslanaraq qurulan xətti regresiya modeli gəlirin əsasən satış həcmi və qiymət faktoru ilə formalaşdığını təsdiqləyir. Məlumat dövrünün qısadır.
+
+
+```
+
